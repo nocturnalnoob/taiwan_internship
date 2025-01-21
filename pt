@@ -1,0 +1,84 @@
+import pyrealsense2 as rs
+import numpy as np
+import open3d as o3d
+
+def convert_bag_to_ply(bag_file, ply_file):
+    # Create a pipeline
+    pipeline = rs.pipeline()
+    config = rs.config()
+
+    # Tell config that we will use a recorded device from file
+    config.enable_device_from_file(bag_file)
+
+    # Configure the pipeline to stream the depth frames
+    config.enable_stream(rs.stream.depth)
+    config.enable_stream(rs.stream.color)
+
+    # Start streaming
+    profile = pipeline.start(config)
+
+    # Get the depth sensor's depth scale
+    depth_sensor = profile.get_device().first_depth_sensor()
+    depth_scale = depth_sensor.get_depth_scale()
+
+    # Create a point cloud object
+    pc = rs.pointcloud()
+    points = rs.points()
+
+    # Create a list to store point cloud data
+    point_clouds = []
+
+    try:
+        while True:
+            # Wait for a coherent pair of frames: depth and color
+            frames = pipeline.wait_for_frames()
+            depth_frame = frames.get_depth_frame()
+            color_frame = frames.get_color_frame()
+            if not depth_frame or not color_frame:
+                continue
+
+            # Generate the point cloud
+            pc.map_to(color_frame)
+            points = pc.calculate(depth_frame)
+
+            # Convert point cloud to Open3D format
+            vtx = np.asanyarray(points.get_vertices()).reshape(-1, 3)  # xyz
+            tex = np.asanyarray(points.get_texture_coordinates()).reshape(-1, 2)  # uv
+
+            # Create an Open3D point cloud object
+            o3d_pc = o3d.geometry.PointCloud()
+            o3d_pc.points = o3d.utility.Vector3dVector(vtx)
+
+            # Get the color data from the texture map
+            color_image = np.asanyarray(color_frame.get_data())
+            color_image = color_image / 255.0  # Normalize to [0,1]
+
+            # Map the texture to the point cloud
+            colors = []
+            for u, v in tex:
+                if u < 0 or v < 0 or u > 1 or v > 1:
+                    colors.append([0, 0, 0])
+                else:
+                    x = min(int(u * color_image.shape[1]), color_image.shape[1] - 1)
+                    y = min(int(v * color_image.shape[0]), color_image.shape[0] - 1)
+                    colors.append(color_image[y, x, :3])
+            o3d_pc.colors = o3d.utility.Vector3dVector(np.array(colors))
+
+            # Append the point cloud to the list
+            point_clouds.append(o3d_pc)
+            break  # Uncomment this line if you only want to process the first frame
+
+    finally:
+        pipeline.stop()
+
+    # Combine all point clouds (if multiple frames are processed)
+    combined_pc = o3d.geometry.PointCloud()
+    for pc in point_clouds:
+        combined_pc += pc
+
+    # Save the combined point cloud to a PLY file
+    o3d.io.write_point_cloud(ply_file, combined_pc)
+    print(f"Saved point cloud to {ply_file}")
+
+# Usage
+convert_bag_to_ply("input.bag", "output.ply")
